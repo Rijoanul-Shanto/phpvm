@@ -32,6 +32,7 @@ if not _FG_FLAGS.intersection(sys.argv[1:]):
         # fork not available (e.g. some sandboxes). run in foreground.
         pass
 
+import fcntl
 import json
 import re
 import shutil
@@ -44,7 +45,7 @@ from pathlib import Path
 try:
     import gi
     gi.require_version('Gtk', '3.0')
-    from gi.repository import Gtk, GLib
+    from gi.repository import Gtk, GLib, Gio
 except ImportError:
     print("Error: python3-gi required.")
     print("Install: sudo apt install python3-gi gir1.2-gtk-3.0")
@@ -113,16 +114,28 @@ def get_current():
 
 
 def switch_php(target):
+    # fast path: passwordless sudo (sudoers NOPASSWD configured by install.sh)
     try:
         r = subprocess.run(
-            ["sudo", "-p", f"[phpvm] switching PHP — password for %u: ", "update-alternatives", "--set", "php", target],
+            ["sudo", "-n", "update-alternatives", "--set", "php", target],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return True, None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # fallback: polkit graphical auth dialog (no terminal needed)
+    try:
+        r = subprocess.run(
+            ["pkexec", "update-alternatives", "--set", "php", target],
             capture_output=True, text=True, timeout=30,
         )
         return r.returncode == 0, (r.stderr.strip() or None)
     except subprocess.TimeoutExpired:
         return False, "timeout"
     except FileNotFoundError:
-        return False, "no_sudo"
+        return False, "no_pkexec"
 
 
 def normalize_version(raw):
@@ -288,22 +301,34 @@ def get_ini_path(version):
 
 
 def reload_fpm(version):
+    # fast path: passwordless sudo
     try:
         r = subprocess.run(
-            ["sudo", "-p", f"[phpvm] restarting php{version}-fpm — password for %u: ", "systemctl", "restart", f"php{version}-fpm"],
+            ["sudo", "-n", "systemctl", "restart", f"php{version}-fpm"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0:
+            return True, None
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    # fallback: polkit graphical auth dialog
+    try:
+        r = subprocess.run(
+            ["pkexec", "systemctl", "restart", f"php{version}-fpm"],
             capture_output=True, text=True, timeout=30,
         )
         return r.returncode == 0, (r.stderr.strip() or None)
     except subprocess.TimeoutExpired:
         return False, "timeout"
     except FileNotFoundError:
-        return False, "no_sudo"
+        return False, "no_pkexec"
 
 
 # ---------- window mode ----------
 
 class PHPSwitcherWindow(Gtk.Window):
-    def __init__(self):
+    def __init__(self, on_switch=None):
         super().__init__(title="phpvm")
         self.set_default_size(720, 520)
         if APP_ICON.startswith("/"):
@@ -313,6 +338,8 @@ class PHPSwitcherWindow(Gtk.Window):
                 self.set_icon_name("dialog-information")
         else:
             self.set_icon_name(APP_ICON)
+
+        self._on_switch_cb = on_switch
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         outer.set_margin_top(12)
@@ -353,6 +380,13 @@ class PHPSwitcherWindow(Gtk.Window):
         folder_btn = Gtk.Button(label="Pick folder…")
         folder_btn.connect("clicked", self._on_folder)
         actions.pack_start(folder_btn, False, False, 0)
+
+        outer.pack_start(Gtk.Separator(), False, False, 2)
+
+        self.status_label = Gtk.Label(xalign=0)
+        self.status_label.set_use_markup(True)
+        self.status_label.set_markup("<small> </small>")
+        outer.pack_start(self.status_label, False, False, 0)
 
         self.refresh()
 
@@ -457,17 +491,21 @@ class PHPSwitcherWindow(Gtk.Window):
         return lbl
 
     def _on_switch(self, _btn, target):
+        name = Path(target).name
+        self._set_status(f"Switching to {name}…")
         def worker():
             ok, err = switch_php(target)
-            GLib.idle_add(self._post_switch, ok, Path(target).name, err)
+            GLib.idle_add(self._post_switch, ok, name, err)
         threading.Thread(target=worker, daemon=True).start()
 
     def _post_switch(self, ok, name, err):
         if ok:
             clear_caches()
-            print(f"phpvm: switched to {name}")
+            self._set_status(f"✓ Switched to {name}", ok=True)
+            if self._on_switch_cb:
+                self._on_switch_cb()
         else:
-            print(f"phpvm: failed to switch to {name}" + (f" ({err})" if err else ""))
+            self._set_status(f"✗ Failed to switch to {name}" + (f": {err}" if err else ""), ok=False)
         self.refresh()
         return False
 
@@ -479,25 +517,34 @@ class PHPSwitcherWindow(Gtk.Window):
 
     def _post_fpm(self, ok, ver, err):
         if ok:
-            print(f"phpvm: restarted php{ver}-fpm")
+            self._set_status(f"✓ Restarted php{ver}-fpm", ok=True)
         else:
-            print(f"phpvm: failed to restart php{ver}-fpm" + (f" ({err})" if err else ""))
+            self._set_status(f"✗ Failed to restart php{ver}-fpm" + (f": {err}" if err else ""), ok=False)
         self.refresh()
         return False
+
+    def _set_status(self, msg, ok=None):
+        if ok is True:
+            markup = f'<b><span foreground="#2da44e">{GLib.markup_escape_text(msg)}</span></b>'
+        elif ok is False:
+            markup = f'<b><span foreground="#cf222e">{GLib.markup_escape_text(msg)}</span></b>'
+        else:
+            markup = f'<i><span foreground="#6e7781">{GLib.markup_escape_text(msg)}</span></i>'
+        self.status_label.set_markup(markup)
 
     def _on_auto(self, _btn):
         proj = detect_project_php()
         if not proj:
-            notify("phpvm", "No .php-version or composer.json found")
+            self._set_status("No .php-version or composer.json found", ok=False)
             return
         target = next(
             (v for v in get_versions() if Path(v).name == f"php{proj}"), None
         )
         if not target:
-            notify("phpvm", f"PHP {proj} required but not installed", urgent=True)
+            self._set_status(f"PHP {proj} required but not installed", ok=False)
             return
         if target == get_current():
-            notify("phpvm", f"Already on PHP {proj}")
+            self._set_status(f"Already on PHP {proj}")
             return
         self._on_switch(None, target)
 
@@ -522,16 +569,16 @@ class PHPSwitcherWindow(Gtk.Window):
             return
         proj = detect_project_php(folder)
         if not proj:
-            notify("phpvm", "No .php-version or composer.json in that folder")
+            self._set_status("No .php-version or composer.json in that folder", ok=False)
             return
         target = next(
             (v for v in get_versions() if Path(v).name == f"php{proj}"), None
         )
         if not target:
-            notify("phpvm", f"PHP {proj} required but not installed", urgent=True)
+            self._set_status(f"PHP {proj} required but not installed", ok=False)
             return
         if target == get_current():
-            notify("phpvm", f"Already on PHP {proj}")
+            self._set_status(f"Already on PHP {proj}")
             return
         self._on_switch(None, target)
 
@@ -562,6 +609,16 @@ class PHPSwitcherTray:
             self.status_icon.connect("popup-menu", self._status_icon_popup)
 
         GLib.timeout_add(REFRESH_MS, self._tick)
+
+        alt = Gio.File.new_for_path("/etc/alternatives/php")
+        self._alt_monitor = alt.monitor_file(Gio.FileMonitorFlags.NONE, None)
+        self._alt_monitor.connect("changed", self._on_alt_changed)
+
+    def _on_alt_changed(self, _monitor, _f, _other, _event):
+        clear_caches()
+        GLib.idle_add(self._tray_refresh)
+        if getattr(self, "_window", None) and self._window.get_visible():
+            GLib.idle_add(self._window.refresh)
 
     def _tray_label(self):
         current = get_current()
@@ -642,6 +699,8 @@ class PHPSwitcherTray:
         self._build_menu()
         if ok:
             print(f"phpvm: switched to {name}")
+            if getattr(self, "_window", None) and self._window.get_visible():
+                self._window.refresh()
         else:
             print(f"phpvm: failed to switch to {name}" + (f" ({err})" if err else ""))
         return False
@@ -688,8 +747,13 @@ class PHPSwitcherTray:
             self._on_auto(None, directory=folder)
 
     def _on_open_window(self, _widget):
-        win = PHPSwitcherWindow()
-        win.show_all()
+        self._window = PHPSwitcherWindow(on_switch=self._tray_refresh)
+        self._window.show_all()
+
+    def _tray_refresh(self):
+        clear_caches()
+        self._refresh_label()
+        self._build_menu()
 
     def _on_tui(self, _widget):
         terminals = [
@@ -717,8 +781,25 @@ class PHPSwitcherTray:
             self.status_icon.set_tooltip_text(label)
 
     def _tick(self):
+        clear_caches()
         self._refresh_label()
+        self._build_menu()
         return True
+
+
+def _acquire_instance_lock():
+    lock_dir = Path(os.environ.get("XDG_RUNTIME_DIR", Path.home() / ".cache" / "phpvm"))
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / "phpvm-gui.lock"
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fd.write(str(os.getpid()))
+        fd.flush()
+        return fd
+    except OSError:
+        fd.close()
+        return None
 
 
 def main():
@@ -735,12 +816,15 @@ def main():
         print("  --foreground   Don't detach from terminal (debugging)")
         return
 
-    if mode == "window":
+    if mode == "tray":
+        _lock = _acquire_instance_lock()
+        if _lock is None:
+            sys.exit(0)
+        PHPSwitcherTray()
+    else:
         win = PHPSwitcherWindow()
         win.connect("destroy", Gtk.main_quit)
         win.show_all()
-    else:
-        PHPSwitcherTray()
     Gtk.main()
 
 
