@@ -6,7 +6,11 @@ autoload -U add-zsh-hook
 
 _php_switcher_auto() {
     command -v phpvm &>/dev/null || return
-    phpvm --auto --quiet 2>/dev/null
+    if [[ -n "${PHPVM_DEBUG:-}" ]]; then
+        phpvm --auto --quiet
+    else
+        phpvm --auto --quiet 2>/dev/null
+    fi
 }
 
 add-zsh-hook chpwd _php_switcher_auto

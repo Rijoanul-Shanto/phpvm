@@ -5,7 +5,11 @@
 
 function _php_switcher_auto --on-variable PWD
     command -q phpvm || return
-    phpvm --auto --quiet 2>/dev/null
+    if set -q PHPVM_DEBUG
+        phpvm --auto --quiet
+    else
+        phpvm --auto --quiet 2>/dev/null
+    end
 end
 
 _php_switcher_auto
