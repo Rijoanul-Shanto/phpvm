@@ -1,7 +1,7 @@
 #!/bin/bash
 # phpvm - PHP Version Manager v2.0.0
 
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -203,9 +203,26 @@ do_switch() {
     local target="$1"
     local quiet="${2:-false}"
 
+    # quiet mode is invoked from shell hooks on terminal open / cd. use
+    # sudo -n so we never block on a silent password prompt the user
+    # can't tell what's asking, so this would feel like a hang or attack.
+    local sudo_args=()
+    [[ "$quiet" == "true" ]] && sudo_args=(-n)
+
     local err
-    err=$(sudo update-alternatives --set php "$target" 2>&1 >/dev/null)
+    err=$(sudo "${sudo_args[@]}" update-alternatives --set php "$target" 2>&1 >/dev/null)
     local code=$?
+
+    # detect "sudo -n needs a password" so callers can show a helpful message
+    # instead of a generic failure. sudo prints various phrasings in different
+    # locales but they all contain one of these substrings.
+    local sudo_needed=0
+    if [[ "$quiet" == "true" && "$code" -ne 0 ]] \
+        && [[ "$err" == *"password is required"* \
+            || "$err" == *"a terminal is required"* \
+            || "$err" == *"askpass"* ]]; then
+        sudo_needed=1
+    fi
 
     if [[ "$quiet" != "true" ]]; then
         if [[ "$code" -eq 0 ]]; then
@@ -217,6 +234,7 @@ do_switch() {
             return 1
         fi
     fi
+    (( sudo_needed )) && return 77
     return "$code"
 }
 
@@ -318,6 +336,15 @@ cmd_auto() {
     if [[ "$quiet" == "true" ]] && command -v notify-send &>/dev/null; then
         if [[ "$rc" -eq 0 ]]; then
             notify-send "phpvm" "Switched to PHP ${ver}" --icon=dialog-information 2>/dev/null
+        elif [[ "$rc" -eq 77 ]]; then
+            notify-send -u normal "phpvm auto-switch" \
+                "Wants to switch to PHP ${ver} but passwordless sudo isn't configured.
+
+Fix once:  sudo bash install.sh  (answer Y to sudoers prompt)
+Or switch:  phpvm --set ${ver}" \
+                --icon=dialog-information 2>/dev/null
+            # Don't fail terminal startup over a missing sudoers rule.
+            return 0
         else
             notify-send -u critical "phpvm" "Failed to switch to PHP ${ver}" --icon=dialog-error 2>/dev/null
         fi
@@ -537,6 +564,121 @@ cmd_self_update() {
     echo -e "  ${GREEN}✓${NC} Updated to ${BOLD}${new_ver}${NC}"
 }
 
+cmd_doctor() {
+    local pass=0
+    local fail=0
+
+    echo -e "${BOLD}${BLUE}phpvm --doctor${NC}  v${VERSION}"
+    echo ""
+
+    # 1. installed binary vs running version
+    local installed_bin
+    installed_bin=$(command -v phpvm 2>/dev/null || echo "")
+    if [[ -n "$installed_bin" ]]; then
+        local installed_ver
+        installed_ver=$(grep -E '^VERSION="' "$installed_bin" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [[ "$installed_ver" == "$VERSION" ]]; then
+            echo -e "  ${GREEN}✓${NC} Binary: ${BOLD}${installed_bin}${NC}  v${installed_ver}"
+            (( pass++ ))
+        else
+            echo -e "  ${YELLOW}!${NC} Binary ${BOLD}${installed_bin}${NC} is v${installed_ver:-?} but source is v${VERSION}"
+            echo -e "    ${DIM}Fix: sudo bash install.sh --upgrade${NC}"
+            (( fail++ ))
+        fi
+    else
+        echo -e "  ${RED}✗${NC} phpvm not found in PATH"
+        (( fail++ ))
+    fi
+
+    # 2. sudoers rule
+    echo ""
+    local sudoers="/etc/sudoers.d/phpvm"
+    if [[ -f "$sudoers" ]]; then
+        local rule
+        rule=$(cat "$sudoers" 2>/dev/null)
+        echo -e "  ${GREEN}✓${NC} Sudoers: ${BOLD}${sudoers}${NC}"
+        echo -e "    ${DIM}${rule}${NC}"
+        if [[ "$rule" == *"php*"* ]]; then
+            echo -e "    ${YELLOW}!${NC} Rule uses old glob ${BOLD}php*${NC} — re-run install.sh to tighten it"
+            (( fail++ ))
+        else
+            (( pass++ ))
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} No sudoers rule at ${BOLD}${sudoers}${NC}"
+        echo -e "    ${DIM}Auto-switch will prompt for password or silently fail.${NC}"
+        echo -e "    ${DIM}Fix: sudo bash install.sh (answer Y to sudoers prompt)${NC}"
+        (( fail++ ))
+    fi
+
+    # 3. test sudo -n live
+    echo ""
+    local current_alt
+    current_alt=$(readlink /etc/alternatives/php 2>/dev/null || echo "")
+    if [[ -n "$current_alt" ]]; then
+        local test_out
+        test_out=$(sudo -n update-alternatives --set php "$current_alt" 2>&1)
+        local test_rc=$?
+        if [[ "$test_rc" -eq 0 ]]; then
+            echo -e "  ${GREEN}✓${NC} sudo -n update-alternatives --set php ${BOLD}$(basename "$current_alt")${NC}  → ok"
+            (( pass++ ))
+        else
+            echo -e "  ${RED}✗${NC} sudo -n update-alternatives failed  (rc=${test_rc})"
+            [[ -n "$test_out" ]] && echo -e "    ${DIM}${test_out}${NC}"
+            echo -e "    ${DIM}Auto-switch will silently no-op without passwordless sudo.${NC}"
+            (( fail++ ))
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} No active PHP alternative — cannot test sudo -n"
+        (( fail++ ))
+    fi
+
+    # 4. hook sourced in shell rc
+    echo ""
+    local shell_name
+    shell_name=$(basename "${SHELL:-bash}")
+    local rc
+    rc=$(shell_rc_path "$shell_name")
+    local hook_dir
+    hook_dir=$(detect_hook_dir 2>/dev/null || echo "")
+    if [[ -n "$hook_dir" && -n "$rc" ]]; then
+        local hook_file="${hook_dir}/php-auto.${shell_name}"
+        if grep -qF "source ${hook_file}" "$rc" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} Hook sourced in ${BOLD}${rc}${NC}"
+            (( pass++ ))
+        else
+            echo -e "  ${YELLOW}!${NC} Hook NOT found in ${BOLD}${rc}${NC}"
+            echo -e "    ${DIM}Fix: phpvm --enable-hook${NC}"
+            (( fail++ ))
+        fi
+    else
+        echo -e "  ${YELLOW}!${NC} Cannot locate hook dir or shell rc (shell=${shell_name})"
+        (( fail++ ))
+    fi
+
+    # 5. project PHP for cwd
+    echo ""
+    local proj_ver
+    proj_ver=$(detect_project_php 2>/dev/null || echo "")
+    if [[ -n "$proj_ver" ]]; then
+        echo -e "  ${GREEN}✓${NC} Project PHP (${DIM}${PWD}${NC}): ${CYAN}${proj_ver}${NC}"
+        (( pass++ ))
+    else
+        echo -e "  ${DIM}—${NC}  No .php-version / composer.json in ${BOLD}${PWD}${NC}"
+    fi
+
+    echo ""
+    echo -e "  ${DIM}────────────────────────────────────────${NC}"
+    if (( fail > 0 )); then
+        echo -e "  ${BOLD}${pass} passed  ${RED}${fail} issue(s)${NC}"
+    else
+        echo -e "  ${BOLD}${GREEN}All checks passed${NC}"
+    fi
+    echo ""
+    (( fail > 0 )) && return 1
+    return 0
+}
+
 cmd_window() {
     if ! command -v phpvm-gui &>/dev/null; then
         echo -e "${RED}phpvm-gui not installed.${NC}" >&2
@@ -548,6 +690,8 @@ cmd_window() {
         echo -e "${DIM}Fix: sudo apt install python3-gi gir1.2-gtk-3.0${NC}" >&2
         exit 1
     fi
+    # phpvm-gui daemonizes itself; the setsid + & is belt-and-suspenders
+    # in case fork() is unavailable (some sandboxes).
     setsid phpvm-gui --window </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
     echo -e "${GREEN}✓${NC} Window launched."
@@ -568,6 +712,7 @@ cmd_help() {
     echo -e "  phpvm --disable-hook [shell] Remove auto-switch hook from shell rc"
     echo -e "  phpvm --window               Open detached GTK picker window (needs phpvm-gui)"
     echo -e "  phpvm --self-update [URL] [REF]  Pull latest from git and re-run installer"
+    echo -e "  phpvm --doctor               Diagnose installation, sudo, and hook setup"
     echo -e "  phpvm --version              Show tool version"
     echo -e "  phpvm --help                 This help"
     echo ""
@@ -828,6 +973,9 @@ case "$CMD" in
         ;;
     --self-update)
         cmd_self_update "${1:-}" "${2:-main}"
+        ;;
+    --doctor)
+        cmd_doctor
         ;;
     -v | --version)
         echo "phpvm $VERSION"

@@ -4,13 +4,39 @@
     sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatana-appindicator3-0.1
 """
 
-import json
 import os
+import sys
+
+# double fork before importing gi/Gtk. forking after GTK/D-Bus init leaves
+# the child with a stale main-context and can hang or crash. detach unless
+# --foreground (debugging) or --help (we want help text on stdout).
+_FG_FLAGS = {"--foreground", "-F", "--help", "-h"}
+if not _FG_FLAGS.intersection(sys.argv[1:]):
+    try:
+        if os.fork() > 0:
+            os._exit(0)
+        os.setsid()
+        if os.fork() > 0:
+            os._exit(0)
+        os.chdir("/")
+        os.umask(0o022)
+        _devnull = os.open(os.devnull, os.O_RDWR)
+        for _fd in (0, 1, 2):
+            try:
+                os.dup2(_devnull, _fd)
+            except OSError:
+                pass
+        if _devnull > 2:
+            os.close(_devnull)
+    except OSError:
+        # fork not available (e.g. some sandboxes). run in foreground.
+        pass
+
+import json
 import re
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 from datetime import date
 from pathlib import Path
@@ -127,9 +153,9 @@ def normalize_version(raw):
 
 
 def detect_project_php(directory=None):
-    """resolve project PHP version. Prefer the CLI's solver (handles composer
+    """resolve project PHP version. prefer the CLI's solver (handles composer
     constraints like ^7.4 || ^8.0) so behavior matches the shell side exactly.
-    Falls back to a local walk if phpvm isn't on PATH.
+    falls back to a local walk if phpvm isn't on PATH.
     """
     cwd = directory or os.getcwd()
 
@@ -722,15 +748,17 @@ class PHPSwitcherTray:
 
 
 def main():
+    # daemonization already happened at module load (top of file).
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     args = sys.argv[1:]
     mode = "tray"
     if "--window" in args or "-w" in args:
         mode = "window"
     elif "--help" in args or "-h" in args:
-        print("Usage: phpvm-gui [--window|-w] [--help]")
-        print("  (no args)   Run as system tray applet")
-        print("  --window    Open the picker window directly (no tray)")
+        print("Usage: phpvm-gui [--window|-w] [--foreground|-F] [--help]")
+        print("  (no args)      Run as system tray applet")
+        print("  --window       Open the picker window directly (no tray)")
+        print("  --foreground   Don't detach from terminal (debugging)")
         return
 
     if mode == "window":
