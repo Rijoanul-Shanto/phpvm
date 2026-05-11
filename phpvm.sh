@@ -47,6 +47,18 @@ find_version_by_query() {
     return 1
 }
 
+# normalize raw version string (e.g. "php8.2", "8.2.0", " 8.2\n") → "8.2"
+normalize_version() {
+    local raw="$1"
+    raw="${raw//[[:space:]]/}"
+    raw="${raw#php}"
+    if [[ "$raw" =~ ^([0-9]+\.[0-9]+) ]]; then
+        echo "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    return 1
+}
+
 # project detection
 
 find_php_version_file() {
@@ -165,14 +177,20 @@ detect_project_php() {
     local vfile
     vfile=$(find_php_version_file "$dir")
     if [[ -n "$vfile" ]]; then
-        tr -d '[:space:]' < "$vfile"
-        return 0
+        local raw
+        raw=$(< "$vfile")
+        local norm
+        if norm=$(normalize_version "$raw"); then
+            echo "$norm"
+            return 0
+        fi
+        return 1
     fi
 
     local cver
     cver=$(detect_from_composer "$dir")
     if [[ -n "$cver" ]]; then
-        echo "$cver"
+        normalize_version "$cver" || echo "$cver"
         return 0
     fi
 
@@ -185,14 +203,17 @@ do_switch() {
     local target="$1"
     local quiet="${2:-false}"
 
-    sudo update-alternatives --set php "$target" >/dev/null 2>&1
+    local err
+    err=$(sudo update-alternatives --set php "$target" 2>&1 >/dev/null)
     local code=$?
 
     if [[ "$quiet" != "true" ]]; then
         if [[ "$code" -eq 0 ]]; then
             echo -e "${GREEN}✓${NC} Switched to ${BOLD}$(basename "$target")${NC}  ${DIM}($(php --version 2>/dev/null | head -1))${NC}"
         else
-            echo -e "${RED}✗${NC} Failed to switch. Check sudo permissions." >&2
+            echo -e "${RED}✗${NC} Failed to switch." >&2
+            [[ -n "$err" ]] && echo -e "${DIM}${err}${NC}" >&2
+            echo -e "${DIM}Tip: configure passwordless sudo (see install.sh) or run via sudo.${NC}" >&2
             return 1
         fi
     fi
@@ -254,14 +275,23 @@ cmd_set() {
 }
 
 cmd_auto() {
-    require_update_alternatives
     local quiet="${1:-false}"
-    local dir="${2:-$PWD}"
+    local print_only="${2:-false}"
+    local dir="${3:-$PWD}"
+
+    if [[ "$print_only" != "true" ]]; then
+        require_update_alternatives
+    fi
 
     local ver
     ver=$(detect_project_php "$dir")
     if [[ -z "$ver" ]]; then
-        [[ "$quiet" != "true" ]] && echo -e "${DIM}No .php-version or composer.json found.${NC}"
+        [[ "$quiet" != "true" && "$print_only" != "true" ]] && echo -e "${DIM}No .php-version or composer.json found.${NC}"
+        return 1
+    fi
+
+    if [[ "$print_only" == "true" ]]; then
+        echo "$ver"
         return 0
     fi
 
@@ -303,7 +333,28 @@ cmd_set_project() {
         exit 1
     fi
 
-    ver="${ver#php}"
+    local norm
+    norm=$(normalize_version "$ver") || {
+        echo -e "${RED}Invalid version: ${ver}${NC}" >&2
+        echo -e "${DIM}Expected format: X.Y (e.g. 8.2)${NC}" >&2
+        exit 1
+    }
+    ver="$norm"
+
+    if ! find_version_by_query "$ver" >/dev/null; then
+        echo -e "${YELLOW}!${NC} PHP ${ver} not installed locally. Writing anyway." >&2
+    fi
+
+    if [[ -f .php-version ]] && [[ -t 0 ]]; then
+        local existing
+        existing=$(< .php-version)
+        existing="${existing//[[:space:]]/}"
+        if [[ "$existing" != "$ver" ]]; then
+            read -rp "  .php-version already says '${existing}'. Overwrite? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] || { echo -e "${DIM}Cancelled.${NC}"; exit 0; }
+        fi
+    fi
+
     echo "$ver" > .php-version
     echo -e "${GREEN}✓${NC} Created ${BOLD}.php-version${NC} → ${CYAN}${ver}${NC}"
 }
@@ -465,8 +516,13 @@ cmd_self_update() {
     echo -e "  ${BLUE}→${NC} Current: ${BOLD}${VERSION}${NC}   New: ${BOLD}${new_ver}${NC}"
 
     if [[ "$VERSION" == "$new_ver" ]]; then
-        read -rp "  Already on ${VERSION}. Reinstall anyway? [y/N] " ans
-        [[ "$ans" =~ ^[Yy]$ ]] || { echo -e "${DIM}Cancelled.${NC}"; exit 0; }
+        if [[ -t 0 ]]; then
+            read -rp "  Already on ${VERSION}. Reinstall anyway? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] || { echo -e "${DIM}Cancelled.${NC}"; exit 0; }
+        else
+            echo -e "${DIM}Already on ${VERSION}; non-interactive — skipping.${NC}"
+            exit 0
+        fi
     fi
 
     local is_system=0
@@ -487,6 +543,11 @@ cmd_window() {
         echo -e "${DIM}Install with: sudo bash install.sh (choose GUI or both)${NC}" >&2
         exit 1
     fi
+    if ! python3 -c "import gi; gi.require_version('Gtk', '3.0'); from gi.repository import Gtk" &>/dev/null; then
+        echo -e "${RED}python3-gi / GTK3 missing.${NC}" >&2
+        echo -e "${DIM}Fix: sudo apt install python3-gi gir1.2-gtk-3.0${NC}" >&2
+        exit 1
+    fi
     setsid phpvm-gui --window </dev/null >/dev/null 2>&1 &
     disown 2>/dev/null || true
     echo -e "${GREEN}✓${NC} Window launched."
@@ -501,6 +562,7 @@ cmd_help() {
     echo -e "  phpvm --current              Show active PHP version"
     echo -e "  phpvm --set <version>        Switch to version (e.g. 8.2)"
     echo -e "  phpvm --auto [--quiet]       Auto-switch from .php-version / composer.json"
+    echo -e "  phpvm --auto --print [dir]   Print resolved project PHP version (no switch)"
     echo -e "  phpvm --set-project <ver>    Write .php-version in current dir"
     echo -e "  phpvm --enable-hook [shell]  Add auto-switch hook to shell rc (bash/zsh/fish)"
     echo -e "  phpvm --disable-hook [shell] Remove auto-switch hook from shell rc"
@@ -740,15 +802,17 @@ case "$CMD" in
         ;;
     -a | --auto)
         QUIET=false
+        PRINT_ONLY=false
         DIR="$PWD"
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 -q | --quiet) QUIET=true ;;
+                --print) PRINT_ONLY=true ;;
                 *) DIR="$1" ;;
             esac
             shift
         done
-        cmd_auto "$QUIET" "$DIR"
+        cmd_auto "$QUIET" "$PRINT_ONLY" "$DIR"
         ;;
     -p | --set-project)
         cmd_set_project "${1:-}"

@@ -39,7 +39,21 @@ for variant in ('AyatanaAppIndicator3', 'AppIndicator3'):
     except (ValueError, ImportError, AttributeError):
         continue
 
-REFRESH_MS = 5000
+REFRESH_MS = 15000
+
+_VERSION_RE = re.compile(r"(\d+\.\d+)")
+
+# per process caches, these probe disk/subprocess for every PHP version on
+# every refresh, which is wasteful. Invalidate via clear_caches() after switch.
+_sapis_cache: dict = {}
+_xdebug_cache: dict = {}
+_ini_cache: dict = {}
+
+
+def clear_caches():
+    _sapis_cache.clear()
+    _xdebug_cache.clear()
+    _ini_cache.clear()
 
 
 def run(args):
@@ -102,14 +116,43 @@ def switch_php(target):
         return False, "no_sudo"
 
 
+def normalize_version(raw):
+    if not raw:
+        return None
+    s = "".join(raw.split())
+    if s.startswith("php"):
+        s = s[3:]
+    m = _VERSION_RE.match(s)
+    return m.group(1) if m else None
+
+
 def detect_project_php(directory=None):
-    start = Path(directory or os.getcwd()).resolve()
+    """resolve project PHP version. Prefer the CLI's solver (handles composer
+    constraints like ^7.4 || ^8.0) so behavior matches the shell side exactly.
+    Falls back to a local walk if phpvm isn't on PATH.
+    """
+    cwd = directory or os.getcwd()
+
+    if shutil.which("phpvm"):
+        try:
+            r = subprocess.run(
+                ["phpvm", "--auto", "--print", cwd],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                norm = normalize_version(r.stdout)
+                if norm:
+                    return norm
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    start = Path(cwd).resolve()
 
     d = start
     while True:
         f = d / ".php-version"
         if f.exists():
-            return f.read_text().strip()
+            return normalize_version(f.read_text())
         if d == d.parent:
             break
         d = d.parent
@@ -121,7 +164,7 @@ def detect_project_php(directory=None):
             try:
                 data = json.loads(composer.read_text())
                 req = data.get("require", {}).get("php", "")
-                m = re.search(r"(\d+\.\d+)", req)
+                m = _VERSION_RE.search(req)
                 if m:
                     return m.group(1)
             except Exception:
@@ -183,6 +226,8 @@ def is_eol(version):
 
 
 def get_sapis(version):
+    if version in _sapis_cache:
+        return _sapis_cache[version]
     sapis = []
     if shutil.which(f"php{version}"):
         sapis.append("cli")
@@ -190,6 +235,7 @@ def get_sapis(version):
         sapis.append("fpm")
     if Path(f"/etc/apache2/mods-available/php{version}.conf").exists():
         sapis.append("apache2")
+    _sapis_cache[version] = sapis
     return sapis
 
 
@@ -205,19 +251,30 @@ def get_fpm_status(version):
 
 
 def get_xdebug_status(version):
+    if version in _xdebug_cache:
+        return _xdebug_cache[version]
     out, code = run([f"php{version}", "-m"])
     if code != 0:
+        _xdebug_cache[version] = None
         return None
-    return any(line.strip().lower() == "xdebug" for line in out.splitlines())
+    res = any(line.strip().lower() == "xdebug" for line in out.splitlines())
+    _xdebug_cache[version] = res
+    return res
 
 
 def get_ini_path(version):
+    if version in _ini_cache:
+        return _ini_cache[version]
     out, code = run([f"php{version}", "--ini"])
     if code != 0:
+        _ini_cache[version] = None
         return None
     for line in out.splitlines():
         if "Loaded Configuration File" in line and ":" in line:
-            return line.split(":", 1)[1].strip()
+            res = line.split(":", 1)[1].strip()
+            _ini_cache[version] = res
+            return res
+    _ini_cache[version] = None
     return None
 
 
@@ -394,6 +451,7 @@ class PHPSwitcherWindow(Gtk.Window):
 
     def _post_switch(self, ok, name, err):
         if ok:
+            clear_caches()
             notify("phpvm", f"Switched to {name}")
         elif err == "needs_sudo":
             notify("phpvm",
@@ -488,7 +546,7 @@ class PHPSwitcherTray:
                 IndicatorCategory.APPLICATION_STATUS
             )
             self.indicator.set_status(IndicatorStatus.ACTIVE)
-            self.indicator.set_label(label, "PHP 8.88")
+            self.indicator.set_label(label, "PHP 99.99")
             self.indicator.set_menu(self.menu)
         else:
             print("Warning: AppIndicator3 not found, falling back to StatusIcon.")
@@ -573,6 +631,8 @@ class PHPSwitcherTray:
         threading.Thread(target=worker, daemon=True).start()
 
     def _post_switch(self, ok, name, err=None):
+        if ok:
+            clear_caches()
         self._refresh_label()
         self._build_menu()
         if ok:
@@ -652,7 +712,7 @@ class PHPSwitcherTray:
     def _refresh_label(self):
         label = self._tray_label()
         if AppIndicator3:
-            self.indicator.set_label(label, "PHP 8.88")
+            self.indicator.set_label(label, "PHP 99.99")
         else:
             self.status_icon.set_tooltip_text(label)
 

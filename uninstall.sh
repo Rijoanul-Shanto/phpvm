@@ -21,38 +21,44 @@ echo -e "${BOLD}${BLUE}│            phpvm Uninstaller            │${NC}"
 echo -e "${BOLD}${BLUE}└─────────────────────────────────────────┘${NC}"
 echo ""
 
-# detect install location, prefer system paths if any system artifact exists
-if [[ -f "/usr/local/bin/phpvm" || -f "/usr/local/bin/phpvm-gui" \
-   || -d "/etc/phpvm" || -f "/etc/sudoers.d/phpvm" \
-   || -f "/usr/share/applications/phpvm-gui.desktop" ]]; then
-    BIN_DIR="/usr/local/bin"
-    HOOK_DIR="/etc/phpvm"
-    SUDOERS="/etc/sudoers.d/phpvm"
-    DESKTOP_SYS="/usr/share/applications/phpvm-gui.desktop"
-else
-    BIN_DIR="$HOME/.local/bin"
-    HOOK_DIR="$HOME/.phpvm"
-    SUDOERS=""
-    DESKTOP_SYS=""
-fi
+# remove from both system and user locations if present.
+BIN_DIRS=("/usr/local/bin" "$HOME/.local/bin")
+HOOK_DIRS=("/etc/phpvm" "$HOME/.phpvm")
+SUDOERS="/etc/sudoers.d/phpvm"
+DESKTOPS=(
+    "/usr/share/applications/phpvm-gui.desktop"
+    "$HOME/.local/share/applications/phpvm-gui.desktop"
+)
 
 # Remove binaries
-for bin in phpvm phpvm-gui; do
-    f="${BIN_DIR}/${bin}"
-    if [[ -f "$f" ]]; then
-        rm -f "$f"
-        success "Removed ${f}"
+for dir in "${BIN_DIRS[@]}"; do
+    for bin in phpvm phpvm-gui; do
+        f="${dir}/${bin}"
+        if [[ -f "$f" ]]; then
+            if [[ -w "$dir" || $EUID -eq 0 ]]; then
+                rm -f "$f"
+            else
+                sudo rm -f "$f"
+            fi
+            success "Removed ${f}"
+        fi
+    done
+done
+
+# remove hook dirs
+for d in "${HOOK_DIRS[@]}"; do
+    if [[ -d "$d" ]]; then
+        if [[ -w "$(dirname "$d")" || $EUID -eq 0 ]]; then
+            rm -rf "$d"
+        else
+            sudo rm -rf "$d"
+        fi
+        success "Removed ${d}"
     fi
 done
 
-# Remove hook dir
-if [[ -d "$HOOK_DIR" ]]; then
-    rm -rf "$HOOK_DIR"
-    success "Removed ${HOOK_DIR}"
-fi
-
 # Remove sudoers
-if [[ -n "$SUDOERS" && -f "$SUDOERS" ]]; then
+if [[ -f "$SUDOERS" ]]; then
     if [[ $EUID -eq 0 ]]; then
         rm -f "$SUDOERS"
     else
@@ -61,13 +67,14 @@ if [[ -n "$SUDOERS" && -f "$SUDOERS" ]]; then
     success "Removed ${SUDOERS}"
 fi
 
-# Remove desktop entries
-for desktop in \
-    "$DESKTOP_SYS" \
-    "$HOME/.local/share/applications/phpvm-gui.desktop"
-do
-    [[ -n "$desktop" && -f "$desktop" ]] || continue
-    rm -f "$desktop"
+# remove desktop entries
+for desktop in "${DESKTOPS[@]}"; do
+    [[ -f "$desktop" ]] || continue
+    if [[ -w "$desktop" || $EUID -eq 0 ]]; then
+        rm -f "$desktop"
+    else
+        sudo rm -f "$desktop"
+    fi
     success "Removed ${desktop}"
 done
 

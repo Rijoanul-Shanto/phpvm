@@ -68,25 +68,31 @@ if (( UPGRADE )); then
         INSTALL_GUI=true
     fi
 else
-    echo ""
-    echo -e "  ${BOLD}What to install?${NC}"
-    echo ""
-    echo -e "    ${CYAN}1)${NC} CLI only        ${DIM}(phpvm terminal UI + commands)${NC}"
-    echo -e "    ${CYAN}2)${NC} GUI only        ${DIM}(phpvm-gui system tray applet)${NC}"
-    echo -e "    ${CYAN}3)${NC} Both            ${DIM}(CLI + GUI)${NC}"
-    echo ""
-    read -rp "  Choice [1/2/3] (default: 3): " choice
-    choice="${choice:-3}"
+    if [[ ! -t 0 ]]; then
+        info "Non-interactive — defaulting to both CLI + GUI"
+        INSTALL_CLI=true
+        INSTALL_GUI=true
+    else
+        echo ""
+        echo -e "  ${BOLD}What to install?${NC}"
+        echo ""
+        echo -e "    ${CYAN}1)${NC} CLI only        ${DIM}(phpvm terminal UI + commands)${NC}"
+        echo -e "    ${CYAN}2)${NC} GUI only        ${DIM}(phpvm-gui system tray applet)${NC}"
+        echo -e "    ${CYAN}3)${NC} Both            ${DIM}(CLI + GUI)${NC}"
+        echo ""
+        read -rp "  Choice [1/2/3] (default: 3): " choice
+        choice="${choice:-3}"
 
-    case "$choice" in
-        1) INSTALL_CLI=true ;;
-        2) INSTALL_GUI=true ;;
-        3) INSTALL_CLI=true; INSTALL_GUI=true ;;
-        *)
-            err "Invalid choice. Aborting."
-            exit 1
-            ;;
-    esac
+        case "$choice" in
+            1) INSTALL_CLI=true ;;
+            2) INSTALL_GUI=true ;;
+            3) INSTALL_CLI=true; INSTALL_GUI=true ;;
+            *)
+                err "Invalid choice. Aborting."
+                exit 1
+                ;;
+        esac
+    fi
 fi
 
 echo ""
@@ -155,13 +161,16 @@ echo ""
 if (( UPGRADE )); then
     ans="n"
     [[ -f /etc/sudoers.d/phpvm ]] && info "Sudoers rule already present — keeping it."
+elif [[ ! -t 0 ]]; then
+    ans="n"
+    info "Non-interactive — skipping sudoers prompt."
 else
     read -rp "  Configure passwordless sudo for update-alternatives? [y/N] " ans
 fi
 if [[ "$ans" =~ ^[Yy]$ ]]; then
     SUDOERS="/etc/sudoers.d/phpvm"
     SUDOERS_TMP="$(mktemp)"
-    RULE="${CURRENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/update-alternatives --set php /usr/bin/php*"
+    RULE="${CURRENT_USER} ALL=(ALL) NOPASSWD: /usr/bin/update-alternatives --set php /usr/bin/php[0-9].[0-9]"
     echo "$RULE" > "$SUDOERS_TMP"
     chmod 440 "$SUDOERS_TMP"
     if sudo visudo -c -f "$SUDOERS_TMP" &>/dev/null; then
@@ -209,6 +218,8 @@ if [[ -n "$RC" ]]; then
         (( UPGRADE )) || warn "Hook already present in ${RC}"
     elif (( UPGRADE )); then
         info "Skipping shell hook prompt (upgrade mode)"
+    elif [[ ! -t 0 ]]; then
+        info "Non-interactive — skipping shell hook (run: phpvm --enable-hook)"
     else
         read -rp "  Add auto-switch hook to ${RC}? [y/N] " ans
         if [[ "$ans" =~ ^[Yy]$ ]]; then
@@ -244,6 +255,10 @@ PHPVM_VERSION_INSTALLED=$(grep -E '^VERSION="' "$SCRIPT_DIR/phpvm.sh" | head -1 
 REPO_URL=""
 if command -v git &>/dev/null && [[ -d "$SCRIPT_DIR/.git" ]]; then
     REPO_URL=$(git -C "$SCRIPT_DIR" config --get remote.origin.url 2>/dev/null || echo "")
+    # Convert git@host:owner/repo[.git] → https://host/owner/repo so --self-update works without ssh keys
+    if [[ "$REPO_URL" =~ ^git@([^:]+):(.+)$ ]]; then
+        REPO_URL="https://${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    fi
 fi
 cat > "${HOOK_DIR}/install.meta" <<EOF
 INSTALL_CLI=${INSTALL_CLI}
