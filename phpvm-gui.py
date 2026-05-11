@@ -69,6 +69,13 @@ REFRESH_MS = 15000
 
 _VERSION_RE = re.compile(r"(\d+\.\d+)")
 
+_ICON_CANDIDATES = [
+    "/usr/share/icons/hicolor/scalable/apps/phpvm.svg",
+    str(Path.home() / ".local/share/icons/hicolor/scalable/apps/phpvm.svg"),
+    "/usr/local/share/icons/hicolor/scalable/apps/phpvm.svg",
+]
+APP_ICON = next((p for p in _ICON_CANDIDATES if Path(p).exists()), "dialog-information")
+
 # per process caches, these probe disk/subprocess for every PHP version on
 # every refresh, which is wasteful. Invalidate via clear_caches() after switch.
 _sapis_cache: dict = {}
@@ -213,7 +220,7 @@ def notify(title, body, urgent=False):
         subprocess.Popen(
             ["notify-send", title, body,
              f"--urgency={'critical' if urgent else 'normal'}",
-             "--icon=dialog-information"],
+             f"--icon={APP_ICON}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
     except FileNotFoundError:
@@ -325,7 +332,13 @@ class PHPSwitcherWindow(Gtk.Window):
     def __init__(self):
         super().__init__(title="phpvm")
         self.set_default_size(720, 520)
-        self.set_icon_name("dialog-information")
+        if APP_ICON.startswith("/"):
+            try:
+                self.set_icon_from_file(APP_ICON)
+            except Exception:
+                self.set_icon_name("dialog-information")
+        else:
+            self.set_icon_name(APP_ICON)
 
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         outer.set_margin_top(12)
@@ -568,7 +581,7 @@ class PHPSwitcherTray:
         if AppIndicator3:
             self.indicator = AppIndicator3.Indicator.new(
                 "phpvm",
-                "dialog-information",
+                APP_ICON,
                 IndicatorCategory.APPLICATION_STATUS
             )
             self.indicator.set_status(IndicatorStatus.ACTIVE)
@@ -578,7 +591,7 @@ class PHPSwitcherTray:
             print("Warning: AppIndicator3 not found, falling back to StatusIcon.")
             print("Install: sudo apt install gir1.2-ayatana-appindicator3-0.1")
             self.status_icon = Gtk.StatusIcon()
-            self.status_icon.set_from_icon_name("dialog-information")
+            self.status_icon.set_from_icon_name(APP_ICON if not APP_ICON.startswith("/") else "dialog-information")
             self.status_icon.set_tooltip_text(label)
             self.status_icon.connect("popup-menu", self._status_icon_popup)
 

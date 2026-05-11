@@ -1,5 +1,5 @@
 #!/bin/bash
-# phpvm - PHP Version Manager v2.0.0
+# phpvm - PHP Version Manager v2.1.0
 
 VERSION="2.1.0"
 
@@ -14,6 +14,14 @@ NC='\033[0m'
 REVERSE='\033[7m'
 
 selected_index=0
+
+PHPVM_ICON=dialog-information
+for _p in /usr/share/icons/hicolor/scalable/apps/phpvm.svg \
+           "$HOME/.local/share/icons/hicolor/scalable/apps/phpvm.svg" \
+           /usr/local/share/icons/hicolor/scalable/apps/phpvm.svg; do
+    [[ -f "$_p" ]] && PHPVM_ICON="$_p" && break
+done
+unset _p
 
 # helpers
 
@@ -335,14 +343,14 @@ cmd_auto() {
 
     if [[ "$quiet" == "true" ]] && command -v notify-send &>/dev/null; then
         if [[ "$rc" -eq 0 ]]; then
-            notify-send "phpvm" "Switched to PHP ${ver}" --icon=dialog-information 2>/dev/null
+            notify-send "phpvm" "Switched to PHP ${ver}" --icon="${PHPVM_ICON}" 2>/dev/null
         elif [[ "$rc" -eq 77 ]]; then
             notify-send -u normal "phpvm auto-switch" \
                 "Wants to switch to PHP ${ver} but passwordless sudo isn't configured.
 
 Fix once:  sudo bash install.sh  (answer Y to sudoers prompt)
 Or switch:  phpvm --set ${ver}" \
-                --icon=dialog-information 2>/dev/null
+                --icon="${PHPVM_ICON}" 2>/dev/null
             # Don't fail terminal startup over a missing sudoers rule.
             return 0
         else

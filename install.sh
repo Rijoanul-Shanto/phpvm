@@ -142,6 +142,23 @@ fi
 
 if [[ "$INSTALL_CLI" == "true" ]]; then
 
+# app icon
+
+echo ""
+info "Installing icon → hicolor theme"
+if [[ $EUID -eq 0 ]]; then
+    ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
+else
+    ICON_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+fi
+mkdir -p "$ICON_DIR"
+cp "$SCRIPT_DIR/assets/phpvm.svg" "$ICON_DIR/phpvm.svg"
+# update icon cache so GTK and AppIndicator3 find the icon by name
+if command -v gtk-update-icon-cache &>/dev/null; then
+    gtk-update-icon-cache -f -t "$(dirname "$(dirname "$ICON_DIR")")" 2>/dev/null || true
+fi
+success "Icon installed → ${ICON_DIR}/phpvm.svg"
+
 # shell hooks
 
 echo ""
