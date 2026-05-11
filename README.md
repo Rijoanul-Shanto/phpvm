@@ -64,8 +64,8 @@ The installer asks: **CLI**, **GUI**, or **both** — and offers to wire up the 
 
 ```bash
 phpvm --self-update                              # uses repo URL captured at install
-phpvm --self-update https://github.com/you/phpvm.git
-phpvm --self-update https://github.com/you/phpvm.git v2.1.0   # specific tag/branch
+phpvm --self-update https://github.com/Rijoanul-Shanto/phpvm.git
+phpvm --self-update https://github.com/Rijoanul-Shanto/phpvm.git v2.1.0   # specific tag/branch
 ```
 
 Re-runs the installer in `--upgrade` mode: same install paths, same CLI/GUI choice, no re-prompting for sudoers or shell hooks. Falls back to a manual repo URL if the original one wasn't recorded (e.g. installed from a tarball).
